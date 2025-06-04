@@ -437,7 +437,7 @@ const filterOutliers = listingsArray => {
 };
 
 const getAverages = (name, buyFiltered, sellFiltered, sku, pricetfItem) => {
-    // Initialse two objects to contain the items final buy and sell prices.
+    // Initialise two objects to contain the items final buy and sell prices.
     var final_buyObj = {
         keys: 0,
         metal: 0
