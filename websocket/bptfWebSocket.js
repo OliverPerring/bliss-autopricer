@@ -85,7 +85,7 @@ function initBptfWebSocket({
                     break;
                 case 'listing-delete':
 
-                    console.log("[WebSocket] Recieved a socket listing delete for : " + response_item.name);
+                    console.log("[WebSocket] Received a socket listing delete for : " + response_item.name);
 
                     try {
                         deleteRemovedListing(steamid, response_item.name, intent);
