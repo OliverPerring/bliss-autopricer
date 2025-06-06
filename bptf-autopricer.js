@@ -152,29 +152,29 @@ const itemListManager = createItemListManager(ITEM_LIST_PATH);
 const { loadNames, watchItemList, getAllowedItemNames, getItemBounds } = itemListManager;
 watchItemList();
 
+const BATCH_SIZE = 20;
+
 const calculateAndEmitPrices = async () => {
-    // Delete old listings from database.
     await deleteOldListings(db);
-    // If the allowedItemNames is empty, we skip the pricing process.
-    let item_objects = [];
-    for (const name of getAllowedItemNames()) {
+
+    const allNames = Array.from(getAllowedItemNames());
+    let batch = [];
+
+    for (let i = 0; i < allNames.length; i++) {
+        const name = allNames[i];
         try {
-            // Get sku of item via the item name.
             let sku = schemaManager.schema.getSkuFromName(name);
-            // Start process of pricing item.
             let arr = await determinePrice(name, sku);
             let item = await finalisePrice(arr, name, sku);
-            // If the item is undefined, we skip it.
-            if (!item) {
-                continue;
-            }
-            // If item is priced at 0, we skip it. Autobot cache of the prices.tf pricelist can sometimes have items set as such.
-            if (item.buy.keys === 0 && item.buy.metal === 0 ||
-                item.sell.keys === 0 && item.sell.metal === 0) {
-                    throw new Error("Autobot cache of prices.tf pricelist has marked item with price of 0.");
+            if (!item) continue;
+            if (
+                (item.buy.keys === 0 && item.buy.metal === 0) ||
+                (item.sell.keys === 0 && item.sell.metal === 0)
+            ) {
+                throw new Error("Autobot cache of prices.tf pricelist has marked item with price of 0.");
             }
 
-            // If it's a key (sku 5021;6), insert the price into the key_prices table
+            // Key logic preserved
             if (sku === '5021;6') {
                 const buyPrice = item.buy.metal;
                 const sellPrice = item.sell.metal;
@@ -183,22 +183,22 @@ const calculateAndEmitPrices = async () => {
                 continue;
             }
 
-            // Save item to pricelist. Pricelist.json is mainly used by the pricing API.
             Methods.addToPricelist(item, PRICELIST_PATH);
-            // Instead of emitting item here, we store it in a array, so we can emit all items at once.
-            // This allows us to control the speed at which we emit items to the client.
-            // Up to your own discretion whether this is needed or not.
-            item_objects.push(item);
+            batch.push(item);
+
+            // If batch is full or last item, emit and reset batch
+            if (batch.length === BATCH_SIZE || i === allNames.length - 1) {
+                // Emit all items in this batch
+                for (const batchItem of batch) {
+                    socketIO.emit('price', batchItem);
+                }
+                batch = [];
+                // Wait between batches
+                await Methods.waitXSeconds(1);
+            }
         } catch (e) {
             console.log("Couldn't create a price for " + name);
         }
-    }
-    // Emit all items within extremely quick succession of eachother.
-    // With a 0.3 second gap between each.
-    for (const item of item_objects) {
-        // Emit item object.
-        await Methods.waitXSeconds(0.3);
-        socketIO.emit('price', item);
     }
 };
 
