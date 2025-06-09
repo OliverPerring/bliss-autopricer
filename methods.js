@@ -65,21 +65,6 @@ Methods.prototype.calculatePercentageDifference = function(value1, value2) {
     return ((value2 - value1) / Math.abs(value1)) * 100;
 };
 
-Methods.prototype.getItemPriceFromExternalPricelist = function(sku, external_pricelist) {
-    let items = external_pricelist.items;
-
-    for (const item of items) {
-        if (item.sku === sku) {
-            var pricetfItem = item;
-            // Source is autobot, no real formatting needed.
-            return {
-                pricetfItem
-            };
-        }
-    }
-    throw new Error('Item not found in external pricelist.');
-};
-
 // Calculate percentage differences and decide on rejecting or accepting the autopricers price
 // based on limits defined in config.json.
 Methods.prototype.calculatePricingAPIDifferences = function(pricetfItem, final_buyObj, final_sellObj, keyobj) {
@@ -130,20 +115,17 @@ Methods.prototype.calculatePricingAPIDifferences = function(pricetfItem, final_b
     }
 };
 
-Methods.prototype.validatePrice = function(percentageDifferences) {
-    // If the percentage difference in how much our pricer has determined we should buy an item
-    // for compared to prices.tf is greater than the limit set in the config, we reject the price.
-
-    // And if the percentage difference in how much our pricer has determined we should sell an item
-    // for compared to prices.tf is less than the limit set in the config, we reject the price.
-
-    // A greater percentage difference for buying, means that our pricer is buying for more than prices.tf.
-    // A lesser percentage difference for selling, means that our pricer is selling for less than prices.tf.
-    if (percentageDifferences.buyDifference > config.maxPercentageDifferences.buy) {
-        throw new Error('Autopricer is buying for too much.');
-    } else if (percentageDifferences.sellDifference < config.maxPercentageDifferences.sell) {
-        throw new Error('Autopricer is selling for too cheap.');
-    }
+Methods.prototype.validatePrice = function(item, buyPrice, sellPrice) {
+    const minMargin = config.minSellMargin || 0.11;
+    
+    // Basic validation rules:
+    // 1. Sell price must be higher than buy price
+    if (sellPrice.metal <= buyPrice.metal) return false;
+    
+    // 2. Margin must be at least minMargin
+    const margin = sellPrice.metal - buyPrice.metal;
+    if (margin < minMargin) return false;
+    
     return true;
 };
 
@@ -262,59 +244,29 @@ Methods.prototype.getListingsFromSnapshots = async function(name) {
     }
 };
 
-Methods.prototype.getJWTFromPricesTF = async function(page, limit) {
-    let tries = 1;
-
-    while (tries <= 3) {
-        try {
-            const response = await axios.post('https://api2.prices.tf/auth/access');
-            if (response.status === 200) {
-                const axiosConfig = {
-                    headers: {
-                        Authorization: `Bearer ${response.data.accessToken}`
-                    },
-                    params: {
-                        page: page,
-                        limit: limit
-                    }
-                };
-                return axiosConfig;
-            }
-        } catch (error) {
-            // Added in rare case we get rate limited requesting a JWT.
-            if (error?.status === 429 || error?.response?.data.statusCode === 429) {
-                // Retry in 60 seconds.
-                await this.waitXSeconds(60);
-            }
-            console.log('Error occurred getting auth token from prices.tf, retrying...');
-        }
-
-        tries++;
-    }
-
-    throw new Error('An error occurred while getting authenticated with Prices.tf');
-};
-
-Methods.prototype.getKeyPriceFromPricesTF = async function() {
+Methods.prototype.getKeyPriceFromBackpackTF = async function() {
     try {
-        const axiosConfig = await this.getJWTFromPricesTF(1, 100);
-
-        let tries = 1;
-        while (tries <= 5) {
-            const response = await axios.get('https://api2.prices.tf/prices/5021;6', axiosConfig);
-
-            if (response.status === 200) {
-                const sellMetal = Methods.halfScrapToRefined(response.data.sellHalfScrap);
-                return {
-                    metal: sellMetal
-                };
-            } 
-
-            tries++;
-        } 
-
-        throw new Error('Failed to get key price from Prices.TF. It is either down or we are being rate-limited.');
+        const response = await axios.get('https://backpack.tf/api/IGetPrices/v4', {
+            params: {
+                key: config.bptfAPIKey,
+                appid: 440,
+                tradable: 1,
+                craftable: 1
+            }
+        });
+        
+        if (response.status === 200) {
+            const keyData = response.data.items['Mann Co. Supply Crate Key'];
+            if (!keyData) throw new Error('Key price not found');
+            
+            const keyPrice = {
+                metal: parseFloat(keyData.prices[6].Tradable.Craftable[0].value) 
+            };
+            
+            return keyPrice;
+        }
     } catch (error) {
+        console.error('Failed to get key price:', error);
         throw error;
     }
 };
@@ -375,31 +327,5 @@ Methods.prototype.getKeyFromExternalAPI = async function() {
         throw error;
     }
 };
-
-Methods.prototype.getExternalPricelist = async function() {
-  try {
-    const response = await axios.get('https://autobot.tf/json/pricelist-array');
-    if (!response.data || !Array.isArray(response.data.items) || response.data.items.length === 0) {
-      throw new Error('No items in external pricelist.');
-    }
-    // Cache the fetched pricelist to file
-    try {
-      await fs.promises.writeFile(CACHE_FILE_PATH, JSON.stringify(response.data, null, 2), 'utf-8');
-    } catch (writeErr) {
-      console.warn(`Failed to write cache file at ${CACHE_FILE_PATH}: ${writeErr.message}`);
-    }
-    return response.data;
-  } catch (err) {
-    console.warn(`Could not fetch external pricelist, falling back to cache: ${err.message}`);
-    try {
-      const cached = await fs.promises.readFile(CACHE_FILE_PATH, 'utf-8');
-      const data = JSON.parse(cached);
-      return data;
-    } catch (cacheErr) {
-      throw new Error(`Failed to fetch external pricelist and no valid cache available: ${cacheErr.message}`);
-    }
-  }
-};
-
 
 module.exports = Methods;

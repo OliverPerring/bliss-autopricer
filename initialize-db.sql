@@ -26,6 +26,10 @@ CREATE TABLE tf2.listing_stats (
     moving_avg_buy_count real DEFAULT 0,
     current_sell_count integer DEFAULT 0,
     moving_avg_sell_count real DEFAULT 0;
+    current_buy_count integer DEFAULT 0,
+    moving_avg_buy_count real DEFAULT 0,
+    current_sell_count integer DEFAULT 0,
+    moving_avg_sell_count real DEFAULT 0;
 );
 CREATE TABLE tf2.price_history (
     sku TEXT NOT NULL,

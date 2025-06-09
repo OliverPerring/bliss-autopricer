@@ -103,439 +103,454 @@ var keyobj;
 var external_pricelist;
 
 const updateKeyObject = async () => {
-  let key_item;
-
   try {
-    // Primary: Prices.TF API
-    key_item = await Methods.getKeyFromExternalAPI();
-  } catch (e) {
-    console.error('Prices.TF API failed, falling back to autobot.tf pricelist');
+    const keyPrice = await Methods.getKeyPriceFromBackpackTF();
+    keyobj = keyPrice;
 
-    // 2a) fetch the external pricelist
-    const externalPricelist = await Methods.getExternalPricelist();
-
-    // 2b) grab the item with the same SKU
-    const { pricetfItem } = Methods.getItemPriceFromExternalPricelist('5021;6', externalPricelist);
-
-    // 2c) reshape to match the key_item interface
-    key_item = {
-      name: pricetfItem.name || 'Mann Co. Supply Crate Key',  // or whatever defaults you prefer
-      sku: '5021;6',
-      source: 'bptf',
+    const keyItem = {
+      name: "Mann Co. Supply Crate Key",
+      sku: "5021;6",
+      source: "bptf",
+      time: Math.floor(Date.now() / 1000),
       buy: {
-        keys: pricetfItem.buy.keys,
-        metal: pricetfItem.buy.metal
+        keys: 0,
+        metal: keyPrice.metal - 0.11,
       },
       sell: {
-        keys: pricetfItem.sell.keys,
-        metal: pricetfItem.sell.metal
+        keys: 0,
+        metal: keyPrice.metal,
       },
-      time: Math.floor(Date.now() / 1000)
     };
+
+    Methods.addToPricelist(keyItem, PRICELIST_PATH);
+    socketIO.emit("price", keyItem);
+  } catch (err) {
+    console.error("Failed to update key price:", err);
   }
-
-  // 3) Now key_item is guaranteed to be defined
-  Methods.addToPricelist(key_item, PRICELIST_PATH);
-
-  keyobj = {
-    metal: key_item.sell.metal
-  };
-
-  socketIO.emit('price', key_item);
 };
 
-const { initBptfWebSocket } = require('./websocket/bptfWebSocket');
+const { initBptfWebSocket } = require("./websocket/bptfWebSocket");
 
 // Load item names and bounds from item_list.json
-const createItemListManager = require('./modules/itemList');
+const createItemListManager = require("./modules/itemList");
 const itemListManager = createItemListManager(ITEM_LIST_PATH);
-const { loadNames, watchItemList, getAllowedItemNames, getItemBounds } = itemListManager;
+const { loadNames, watchItemList, getAllowedItemNames, getItemBounds } =
+  itemListManager;
 watchItemList();
 
 const calculateAndEmitPrices = async () => {
-    // Delete old listings from database.
-    await deleteOldListings(db);
-    // If the allowedItemNames is empty, we skip the pricing process.
-    let item_objects = [];
-    for (const name of getAllowedItemNames()) {
-        try {
-            // Get sku of item via the item name.
-            let sku = schemaManager.schema.getSkuFromName(name);
-            // Start process of pricing item.
-            let arr = await determinePrice(name, sku);
-            let item = await finalisePrice(arr, name, sku);
-            // If the item is undefined, we skip it.
-            if (!item) {
-                continue;
-            }
-            // If item is priced at 0, we skip it. Autobot cache of the prices.tf pricelist can sometimes have items set as such.
-            if (item.buy.keys === 0 && item.buy.metal === 0 ||
-                item.sell.keys === 0 && item.sell.metal === 0) {
-                    throw new Error("Autobot cache of prices.tf pricelist has marked item with price of 0.");
-            }
+  // Delete old listings from database.
+  await deleteOldListings(db);
+  // If the allowedItemNames is empty, we skip the pricing process.
+  let item_objects = [];
+  for (const name of getAllowedItemNames()) {
+    try {
+      // Get sku of item via the item name.
+      let sku = schemaManager.schema.getSkuFromName(name);
+      // Start process of pricing item.
+      let arr = await determinePrice(name, sku);
+      let item = await finalisePrice(arr, name, sku);
+      // If the item is undefined, we skip it.
+      if (!item) {
+        continue;
+      }
+      // If item is priced at 0, we skip it. Autobot cache of the prices.tf pricelist can sometimes have items set as such.
+      if (
+        (item.buy.keys === 0 && item.buy.metal === 0) ||
+        (item.sell.keys === 0 && item.sell.metal === 0)
+      ) {
+        throw new Error(
+          "Autobot cache of prices.tf pricelist has marked item with price of 0."
+        );
+      }
 
-            // If it's a key (sku 5021;6), insert the price into the key_prices table
-            if (sku === '5021;6') {
-                const buyPrice = item.buy.metal;
-                const sellPrice = item.sell.metal;
-                const timestamp = Math.floor(Date.now() / 1000);
-                await insertKeyPrice(db, keyobj, buyPrice, sellPrice, timestamp);
-                continue;
-            }
+      // If it's a key (sku 5021;6), insert the price into the key_prices table
+      if (sku === "5021;6") {
+        const buyPrice = item.buy.metal;
+        const sellPrice = item.sell.metal;
+        const timestamp = Math.floor(Date.now() / 1000);
+        await insertKeyPrice(db, keyobj, buyPrice, sellPrice, timestamp);
+        continue;
+      }
 
-            // Save item to pricelist. Pricelist.json is mainly used by the pricing API.
-            Methods.addToPricelist(item, PRICELIST_PATH);
-            // Instead of emitting item here, we store it in a array, so we can emit all items at once.
-            // This allows us to control the speed at which we emit items to the client.
-            // Up to your own discretion whether this is needed or not.
-            item_objects.push(item);
-        } catch (e) {
-            console.log("Couldn't create a price for " + name);
-        }
+      // Save item to pricelist. Pricelist.json is mainly used by the pricing API.
+      Methods.addToPricelist(item, PRICELIST_PATH);
+      // Instead of emitting item here, we store it in a array, so we can emit all items at once.
+      // This allows us to control the speed at which we emit items to the client.
+      // Up to your own discretion whether this is needed or not.
+      item_objects.push(item);
+    } catch (e) {
+      console.log("Couldn't create a price for " + name);
     }
-    // Emit all items within extremely quick succession of eachother.
-    // With a 0.3 second gap between each.
-    for (const item of item_objects) {
-        // Emit item object.
-        await Methods.waitXSeconds(0.3);
-        socketIO.emit('price', item);
-    }
+  }
+  // Emit all items within extremely quick succession of eachother.
+  // With a 0.3 second gap between each.
+  for (const item of item_objects) {
+    // Emit item object.
+    await Methods.waitXSeconds(0.3);
+    socketIO.emit("price", item);
+  }
 };
 
 // When the schema manager is ready we proceed.
-schemaManager.init(async function(err) {
-    if (err) throw err;
+schemaManager.init(async function (err) {
+  if (err) throw err;
 
-    // Start watching pricelist.json for “old” entries
-    // pricelist.json lives in ./files/pricelist.json relative to this file:
-    const pricelistPath = path.resolve(__dirname, './files/pricelist.json');
-    // You can pass a custom ageThresholdSec (default is 2*3600) and intervalSec (default is 300)
-    PriceWatcher.watchPrices(pricelistPath /*, ageThresholdSec, intervalSec */);
+  // Start watching pricelist.json for “old” entries
+  // pricelist.json lives in ./files/pricelist.json relative to this file:
+  const pricelistPath = path.resolve(__dirname, "./files/pricelist.json");
+  // You can pass a custom ageThresholdSec (default is 2*3600) and intervalSec (default is 300)
+  PriceWatcher.watchPrices(pricelistPath /*, ageThresholdSec, intervalSec */);
 
-	// Get external pricelist.
-    external_pricelist = await Methods.getExternalPricelist();
-    // Update key object.
-    await updateKeyObject();
-    // Get external pricelist.
-    //external_pricelist = await Methods.getExternalPricelist();
-    // Calculate and emit prices on startup.
-    await calculateAndEmitPrices();
-    // Call this once at startup if needed
-    await initializeListingStats(db);
-    //InitialKeyPricingContinued
-    await checkKeyPriceStability({
+  // Get external pricelist.
+  //external_pricelist = await Methods.getExternalPricelist();
+  // Update key object.
+  await updateKeyObject();
+  // Get external pricelist.
+  //external_pricelist = await Methods.getExternalPricelist();
+  // Calculate and emit prices on startup.
+  await calculateAndEmitPrices();
+  // Call this once at startup if needed
+  await initializeListingStats(db);
+  //InitialKeyPricingContinued
+  await checkKeyPriceStability({
+    db,
+    Methods,
+    keyobj,
+    adjustPrice,
+    sendPriceAlert,
+    PRICELIST_PATH,
+    socketIO,
+  });
+
+  // Start scheduled tasks after everything is ready
+  scheduleTasks({
+    updateExternalPricelist: async () => {
+      external_pricelist = await Methods.getExternalPricelist();
+    },
+    calculateAndEmitPrices,
+    cleanupOldKeyPrices: async (db) => {
+      await cleanupOldKeyPrices(db);
+    },
+    checkKeyPriceStability: async () => {
+      await checkKeyPriceStability({
         db,
         Methods,
         keyobj,
         adjustPrice,
         sendPriceAlert,
         PRICELIST_PATH,
-        socketIO
-    });
-    
-    // Start scheduled tasks after everything is ready
-    scheduleTasks({
-        updateExternalPricelist: async () => { external_pricelist = await Methods.getExternalPricelist(); },
-        calculateAndEmitPrices,
-        cleanupOldKeyPrices: async (db) => { await cleanupOldKeyPrices(db); },
-        checkKeyPriceStability: async () => {
-            await checkKeyPriceStability({
-                db,
-                Methods,
-                keyobj,
-                adjustPrice,
-                sendPriceAlert,
-                PRICELIST_PATH,
-                socketIO
-            });
-        },
-        updateMovingAverages: async (db, pgp) => { await updateMovingAverages(db, pgp); },
-        db,
-        pgp
-    });
+        socketIO,
+      });
+    },
+    updateMovingAverages: async (db, pgp) => {
+      await updateMovingAverages(db, pgp);
+    },
+    db,
+    pgp,
+  });
 
-    startPriceWatcher();
+  startPriceWatcher();
 });
 
 async function isPriceSwingAcceptable(prev, next, sku) {
-    // Fetch last 5 prices from DB
-    const history = await db.any(
-        'SELECT buy_metal, sell_metal FROM price_history WHERE sku = $1 ORDER BY timestamp DESC LIMIT 5',
-        [sku]
-    );
-    if (history.length === 0) return true; // No history, allow
+  // Fetch last 5 prices from DB
+  const history = await db.any(
+    "SELECT buy_metal, sell_metal FROM price_history WHERE sku = $1 ORDER BY timestamp DESC LIMIT 5",
+    [sku]
+  );
+  if (history.length === 0) return true; // No history, allow
 
-    const avgBuy = history.reduce((sum, p) => sum + Number(p.buy_metal), 0) / history.length;
-    const avgSell = history.reduce((sum, p) => sum + Number(p.sell_metal), 0) / history.length;
+  const avgBuy =
+    history.reduce((sum, p) => sum + Number(p.buy_metal), 0) / history.length;
+  const avgSell =
+    history.reduce((sum, p) => sum + Number(p.sell_metal), 0) / history.length;
 
-    const nextBuy = Methods.toMetal(next.buy, keyobj.metal);
-    const nextSell = Methods.toMetal(next.sell, keyobj.metal);
+  const nextBuy = Methods.toMetal(next.buy, keyobj.metal);
+  const nextSell = Methods.toMetal(next.sell, keyobj.metal);
 
-    const maxBuyIncrease = config.priceSwingLimits?.maxBuyIncrease ?? 0.10;
-    const maxSellDecrease = config.priceSwingLimits?.maxSellDecrease ?? 0.10;
+  const maxBuyIncrease = config.priceSwingLimits?.maxBuyIncrease ?? 0.1;
+  const maxSellDecrease = config.priceSwingLimits?.maxSellDecrease ?? 0.1;
 
-    if (nextBuy > avgBuy && (nextBuy - avgBuy) / avgBuy > maxBuyIncrease) {
-        return false;
-    }
-    if (nextSell < avgSell && (avgSell - nextSell) / avgSell > maxSellDecrease) {
-        return false;
-    }
-    return true;
+  if (nextBuy > avgBuy && (nextBuy - avgBuy) / avgBuy > maxBuyIncrease) {
+    return false;
+  }
+  if (nextSell < avgSell && (avgSell - nextSell) / avgSell > maxSellDecrease) {
+    return false;
+  }
+  return true;
 }
 
 const determinePrice = async (name, sku) => {
-    // Delete listings based on moving averages.
-    await deleteOldListings(db);
+  // Delete listings based on moving averages.
+  await deleteOldListings(db);
 
-    var buyListings = await getListings(db, name, 'buy');
-    var sellListings = await getListings(db, name, 'sell');
+  var buyListings = await getListings(db, name, "buy");
+  var sellListings = await getListings(db, name, "sell");
 
+  // Get the price of the item from the in-memory external pricelist.
+  var data;
+  try {
+    data = Methods.getItemPriceFromExternalPricelist(sku, external_pricelist);
+  } catch (e) {
+    throw new Error(
+      `| UPDATING PRICES |: Couldn't price ${name}. Issue with Prices.tf.`
+    );
+  }
 
-    // Get the price of the item from the in-memory external pricelist.
-    var data;
-    try {
-        data = Methods.getItemPriceFromExternalPricelist(sku, external_pricelist);
-    } catch (e) {
-        throw new Error(`| UPDATING PRICES |: Couldn't price ${name}. Issue with Prices.tf.`);
-    }
+  var pricetfItem = data.pricetfItem;
 
-    var pricetfItem = data.pricetfItem;
-
-    if (
-        (pricetfItem.buy.keys === 0 && pricetfItem.buy.metal === 0) ||
-        (pricetfItem.sell.keys === 0 && pricetfItem.sell.metal === 0)
-    ) {
-        throw new Error(`| UPDATING PRICES |: Couldn't price ${name}. Item is not priced on prices.tf, therefore we can't
+  if (
+    (pricetfItem.buy.keys === 0 && pricetfItem.buy.metal === 0) ||
+    (pricetfItem.sell.keys === 0 && pricetfItem.sell.metal === 0)
+  ) {
+    throw new Error(`| UPDATING PRICES |: Couldn't price ${name}. Item is not priced on prices.tf, therefore we can't
         compare our average price to it's average price.`);
+  }
+
+  try {
+    // Check for undefined. No listings.
+    if (!buyListings || !sellListings) {
+      throw new Error(`| UPDATING PRICES |: ${name} not enough listings...`);
     }
 
-
-    try {
-        // Check for undefined. No listings.
-        if (!buyListings || !sellListings) {
-            throw new Error(`| UPDATING PRICES |: ${name} not enough listings...`);
-        }
-
-        if (buyListings.rowCount === 0 || sellListings.rowCount === 0) {
-            throw new Error(`| UPDATING PRICES |: ${name} not enough listings...`);
-        }
-    } catch (e) {
-        if(fallbackOntoPricesTf) {
-            const final_buyObj = {
-                keys: pricetfItem.buy.keys,
-                metal: pricetfItem.buy.metal 
-            };
-            const final_sellObj = {
-                keys: pricetfItem.sell.keys,
-                metal: pricetfItem.sell.metal
-            };
-            // Return prices.tf price.
-            return [final_buyObj, final_sellObj];
-        }
-        // If we don't fallback onto prices.tf, re-throw the error.
-        throw e;
+    if (buyListings.rowCount === 0 || sellListings.rowCount === 0) {
+      throw new Error(`| UPDATING PRICES |: ${name} not enough listings...`);
     }
+  } catch (e) {
+    // If we don't fallback onto prices.tf, re-throw the error.
+    throw e;
+  }
 
-    // Sort buyListings into descending order of price.
-    var buyFiltered = buyListings.rows.sort((a, b) => {
-        let valueA = Methods.toMetal(a.currencies, keyobj.metal);
-        let valueB = Methods.toMetal(b.currencies, keyobj.metal);
+  // Sort buyListings into descending order of price.
+  var buyFiltered = buyListings.rows.sort((a, b) => {
+    let valueA = Methods.toMetal(a.currencies, keyobj.metal);
+    let valueB = Methods.toMetal(b.currencies, keyobj.metal);
 
-        return valueB - valueA;
-    });
+    return valueB - valueA;
+  });
 
-    // Sort sellListings into ascending order of price.
-    var sellFiltered = sellListings.rows.sort((a, b) => {
-        let valueA = Methods.toMetal(a.currencies, keyobj.metal);
-        let valueB = Methods.toMetal(b.currencies, keyobj.metal);
+  // Sort sellListings into ascending order of price.
+  var sellFiltered = sellListings.rows.sort((a, b) => {
+    let valueA = Methods.toMetal(a.currencies, keyobj.metal);
+    let valueB = Methods.toMetal(b.currencies, keyobj.metal);
 
-        return valueA - valueB;
-    });
+    return valueA - valueB;
+  });
 
-    // We prioritise using listings from bots in our prioritySteamIds list.
-    // I.e., we move listings by those trusted steamids to the front of the
-    // array, to be used as a priority over any others.
+  // We prioritise using listings from bots in our prioritySteamIds list.
+  // I.e., we move listings by those trusted steamids to the front of the
+  // array, to be used as a priority over any others.
 
-    buyFiltered = buyListings.rows.sort((a, b) => {
-        // Custom sorting logic to prioritize specific Steam IDs
-        const aIsPrioritized = prioritySteamIds.includes(a.steamid);
-        const bIsPrioritized = prioritySteamIds.includes(b.steamid);
+  buyFiltered = buyListings.rows.sort((a, b) => {
+    // Custom sorting logic to prioritize specific Steam IDs
+    const aIsPrioritized = prioritySteamIds.includes(a.steamid);
+    const bIsPrioritized = prioritySteamIds.includes(b.steamid);
 
-        if (aIsPrioritized && !bIsPrioritized) {
-            return -1; // a comes first
-        } else if (!aIsPrioritized && bIsPrioritized) {
-            return 1; // b comes first
-        } else {
-            return 0; // maintain the original order (no priority)
-        }
-    });
-
-    sellFiltered = sellListings.rows.sort((a, b) => {
-        // Custom sorting logic to prioritize specific Steam IDs
-        const aIsPrioritized = prioritySteamIds.includes(a.steamid);
-        const bIsPrioritized = prioritySteamIds.includes(b.steamid);
-
-        if (aIsPrioritized && !bIsPrioritized) {
-            return -1; // a comes first
-        } else if (!aIsPrioritized && bIsPrioritized) {
-            return 1; // b comes first
-        } else {
-            return 0; // maintain the original order (no priority)
-        }
-    });
-
-    try {
-        // If the buyFiltered or sellFiltered arrays are empty, we throw an error.
-        let arr = getAverages(name, buyFiltered, sellFiltered, sku, pricetfItem);
-        return arr;
-    } catch (e) {
-        throw new Error(e);
+    if (aIsPrioritized && !bIsPrioritized) {
+      return -1; // a comes first
+    } else if (!aIsPrioritized && bIsPrioritized) {
+      return 1; // b comes first
+    } else {
+      return 0; // maintain the original order (no priority)
     }
+  });
+
+  sellFiltered = sellListings.rows.sort((a, b) => {
+    // Custom sorting logic to prioritize specific Steam IDs
+    const aIsPrioritized = prioritySteamIds.includes(a.steamid);
+    const bIsPrioritized = prioritySteamIds.includes(b.steamid);
+
+    if (aIsPrioritized && !bIsPrioritized) {
+      return -1; // a comes first
+    } else if (!aIsPrioritized && bIsPrioritized) {
+      return 1; // b comes first
+    } else {
+      return 0; // maintain the original order (no priority)
+    }
+  });
+
+  try {
+    // If the buyFiltered or sellFiltered arrays are empty, we throw an error.
+    let arr = getAverages(name, buyFiltered, sellFiltered, sku);
+    return arr;
+  } catch (e) {
+    throw new Error(e);
+  }
 };
 
 // Function to calculate the Z-score for a given value.
 // The Z-score is a measure of how many standard deviations a value is from the mean.
 const calculateZScore = (value, mean, stdDev) => {
-    if (stdDev === 0) {
-        throw new Error('Standard deviation cannot be zero.');
-    }
-    return (value - mean) / stdDev;
+  if (stdDev === 0) {
+    throw new Error("Standard deviation cannot be zero.");
+  }
+  return (value - mean) / stdDev;
 };
 
-const filterOutliers = listingsArray => {
-    // Calculate mean and standard deviation of listings.
-    const prices = listingsArray.map(listing => Methods.toMetal(listing.currencies, keyobj.metal));
-    const mean = Methods.getRight(prices.reduce((acc, curr) => acc + curr, 0) / prices.length);
-    const stdDev = Math.sqrt(prices.reduce((acc, curr) => acc + Math.pow(curr - mean, 2), 0) / prices.length);
+const filterOutliers = (listingsArray) => {
+  // Calculate mean and standard deviation of listings.
+  const prices = listingsArray.map((listing) =>
+    Methods.toMetal(listing.currencies, keyobj.metal)
+  );
+  const mean = Methods.getRight(
+    prices.reduce((acc, curr) => acc + curr, 0) / prices.length
+  );
+  const stdDev = Math.sqrt(
+    prices.reduce((acc, curr) => acc + Math.pow(curr - mean, 2), 0) /
+      prices.length
+  );
 
-    // Filter out listings that are 3 standard deviations away from the mean.
-    // To put it plainly, we're filtering out listings that are paying either
-    // too little or too much compared to the mean.
-    const filteredListings = listingsArray.filter(listing => {
-        const zScore = calculateZScore(Methods.toMetal(listing.currencies, keyobj.metal), mean, stdDev);
-        return zScore <= 3 && zScore >= -3;
-    });
+  // Filter out listings that are 3 standard deviations away from the mean.
+  // To put it plainly, we're filtering out listings that are paying either
+  // too little or too much compared to the mean.
+  const filteredListings = listingsArray.filter((listing) => {
+    const zScore = calculateZScore(
+      Methods.toMetal(listing.currencies, keyobj.metal),
+      mean,
+      stdDev
+    );
+    return zScore <= 3 && zScore >= -3;
+  });
 
-    if(filteredListings.length < 3) {
-        throw new Error('Not enough listings after filtering outliers.');
-    }
-    // Get the first 3 buy listings from the filtered listings and calculate the mean.
-    // The listings here should be free of outliers. It's also sorted in order of
-    // trusted steamids (when applicable).
-    var filteredMean = 0;
-    for (var i = 0; i <= 2; i++) {
-        filteredMean += +Methods.toMetal(filteredListings[i].currencies, keyobj.metal);
-    }
-    filteredMean /= 3;
+  if (filteredListings.length < 3) {
+    throw new Error("Not enough listings after filtering outliers.");
+  }
+  // Get the first 3 buy listings from the filtered listings and calculate the mean.
+  // The listings here should be free of outliers. It's also sorted in order of
+  // trusted steamids (when applicable).
+  var filteredMean = 0;
+  for (var i = 0; i <= 2; i++) {
+    filteredMean += +Methods.toMetal(
+      filteredListings[i].currencies,
+      keyobj.metal
+    );
+  }
+  filteredMean /= 3;
 
-    // Validate the mean.
-    if (!filteredMean || isNaN(filteredMean) || filteredMean === 0) {
-        throw new Error('Mean calculated is invalid.');
-    }
+  // Validate the mean.
+  if (!filteredMean || isNaN(filteredMean) || filteredMean === 0) {
+    throw new Error("Mean calculated is invalid.");
+  }
 
-    return filteredMean;
+  return filteredMean;
 };
 
-const getAverages = (name, buyFiltered, sellFiltered, sku, pricetfItem) => {
-    // Initialse two objects to contain the items final buy and sell prices.
-    var final_buyObj = {
-        keys: 0,
-        metal: 0
-    };
-    var final_sellObj = {
-        keys: 0,
-        metal: 0
-    };
+const getAverages = (name, buyFiltered, sellFiltered, sku) => {
+  // Initialse two objects to contain the items final buy and sell prices.
+  var final_buyObj = {
+    keys: 0,
+    metal: 0,
+  };
+  var final_sellObj = {
+    keys: 0,
+    metal: 0,
+  };
 
+  try {
+    if (buyFiltered.length < 3) {
+      throw new Error(
+        `| UPDATING PRICES |: ${name} not enough buy listings...`
+      );
+    } else if (buyFiltered.length > 3 && buyFiltered.length < 10) {
+      var totalValue = {
+        keys: 0,
+        metal: 0,
+      };
+      // If there are more than 3 buy listings, we take the first 3 and calculate the mean average price.
+      for (var i = 0; i <= 2; i++) {
+        // If the keys or metal value is undefined, we set it to 0.
+        totalValue.keys += Object.is(buyFiltered[i].currencies.keys, undefined)
+          ? 0
+          : buyFiltered[i].currencies.keys;
+        // If the metal value is undefined, we set it to 0.
+        totalValue.metal += Object.is(
+          buyFiltered[i].currencies.metal,
+          undefined
+        )
+          ? 0
+          : buyFiltered[i].currencies.metal;
+      }
+      final_buyObj = {
+        keys: Math.trunc(totalValue.keys / i),
+        metal: totalValue.metal / i,
+      };
+    } else {
+      // Filter out outliers from set, and calculate a mean average price in terms of metal value.
+      let filteredMean = filterOutliers(buyFiltered);
+      // Caclulate the maximum amount of keys that can be made with the metal value returned.
+      let keys = Math.trunc(filteredMean / keyobj.metal);
+      // Calculate the remaining metal value after the value of the keys has been removed.
+      let metal = Methods.getRight(filteredMean - keys * keyobj.metal);
+      // Create the final buy object.
+      final_buyObj = {
+        keys: keys,
+        metal: metal,
+      };
+    }
+    // Decided to pick the very first sell listing as it's ordered by the lowest sell price. I.e., the most competitive.
+    // However, I decided to prioritise 'trusted' listings by certain steamids. This may result in a very high sell price, instead
+    // of a competitive one.
+    if (sellFiltered.length > 0) {
+      final_sellObj.keys = Object.is(sellFiltered[0].currencies.keys, undefined)
+        ? 0
+        : sellFiltered[0].currencies.keys;
+      final_sellObj.metal = Object.is(
+        sellFiltered[0].currencies.metal,
+        undefined
+      )
+        ? 0
+        : sellFiltered[0].currencies.metal;
+    } else {
+      throw new Error(
+        `| UPDATING PRICES |: ${name} not enough sell listings...`
+      ); // Not enough
+    }
+
+    var usePrices = false;
     try {
-        if (buyFiltered.length < 3) {
-            throw new Error(`| UPDATING PRICES |: ${name} not enough buy listings...`);
-        } else if (buyFiltered.length > 3 && buyFiltered.length < 10) {
-            var totalValue = {
-                keys: 0,
-                metal: 0
-            };
-            // If there are more than 3 buy listings, we take the first 3 and calculate the mean average price.
-            for (var i = 0; i <= 2; i++) {
-                // If the keys or metal value is undefined, we set it to 0.
-                totalValue.keys += Object.is(buyFiltered[i].currencies.keys, undefined) ?
-                    0 :
-                    buyFiltered[i].currencies.keys;
-                // If the metal value is undefined, we set it to 0.
-                totalValue.metal += Object.is(buyFiltered[i].currencies.metal, undefined) ?
-                    0 :
-                    buyFiltered[i].currencies.metal;
-            }
-            final_buyObj = {
-                keys: Math.trunc(totalValue.keys / i),
-                metal: totalValue.metal / i
-            };
-        } else {
-            // Filter out outliers from set, and calculate a mean average price in terms of metal value.
-            let filteredMean = filterOutliers(buyFiltered);
-            // Caclulate the maximum amount of keys that can be made with the metal value returned.
-            let keys = Math.trunc(filteredMean / keyobj.metal);
-            // Calculate the remaining metal value after the value of the keys has been removed.
-            let metal = Methods.getRight(filteredMean - keys * keyobj.metal);
-            // Create the final buy object.
-            final_buyObj = {
-                keys: keys,
-                metal: metal
-            };
-        }
-        // Decided to pick the very first sell listing as it's ordered by the lowest sell price. I.e., the most competitive.
-        // However, I decided to prioritise 'trusted' listings by certain steamids. This may result in a very high sell price, instead
-        // of a competitive one.
-        if (sellFiltered.length > 0) {
-            final_sellObj.keys = Object.is(sellFiltered[0].currencies.keys, undefined) ?
-                0 :
-                sellFiltered[0].currencies.keys;
-            final_sellObj.metal = Object.is(sellFiltered[0].currencies.metal, undefined) ?
-                0 :
-                sellFiltered[0].currencies.metal;
-        } else {
-            throw new Error(`| UPDATING PRICES |: ${name} not enough sell listings...`); // Not enough
-        }
-
-        var usePrices = false;
-        try {
-            // Will return true or false. True if we are ok with the autopricers price, false if we are not.
-            // We use prices.tf as a baseline.
-            usePrices = Methods.calculatePricingAPIDifferences(pricetfItem, final_buyObj, final_sellObj, keyobj);
-        } catch (e) {
-            // Create an error object with a message detailing this difference.
-            throw new Error(`| UPDATING PRICES |: Our autopricer determined that name ${name} should sell for : ${final_sellObj.keys} keys and 
+      // Will return true or false. True if we are ok with the autopricers price, false if we are not.
+      // We use prices.tf as a baseline.
+      usePrices = Methods.calculatePricingAPIDifferences(
+        pricetfItem,
+        final_buyObj,
+        final_sellObj,
+        keyobj
+      );
+    } catch (e) {
+      // Create an error object with a message detailing this difference.
+      throw new Error(`| UPDATING PRICES |: Our autopricer determined that name ${name} should sell for : ${final_sellObj.keys} keys and 
             ${final_sellObj.metal} ref, and buy for ${final_buyObj.keys} keys and ${final_buyObj.metal} ref. Prices.tf
             determined I should sell for ${pricetfItem.sell.keys} keys and ${pricetfItem.sell.metal} ref, and buy for
             ${pricetfItem.buy.keys} keys and ${pricetfItem.buy.metal} ref. Message returned by the method: ${e.message}`);
-        }
+    }
 
-        // if-else statement probably isn't needed, but I'm just being cautious.
-        if (usePrices) {
-            // The final averages are returned here. But work is still needed to be done. We can't assume that the buy average is
-            // going to be lower than the sell average price. So we need to check for this later.
-            return [final_buyObj, final_sellObj];
-        } else {
-            throw new Error(`| UPDATING PRICES |: ${name} pricing average generated by autopricer is too dramatically
+    // if-else statement probably isn't needed, but I'm just being cautious.
+    if (usePrices) {
+      // The final averages are returned here. But work is still needed to be done. We can't assume that the buy average is
+      // going to be lower than the sell average price. So we need to check for this later.
+      return [final_buyObj, final_sellObj];
+    } else {
+      throw new Error(`| UPDATING PRICES |: ${name} pricing average generated by autopricer is too dramatically
             different to one returned by prices.tf`);
-        }
-    } catch (error) {
-        // If configured, we fallback onto prices.tf for the price.
-        if(fallbackOntoPricesTf) {
-            const final_buyObj = {
-                keys: pricetfItem.buy.keys,
-                metal: pricetfItem.buy.metal 
-            };
-            const final_sellObj = {
-                keys: pricetfItem.sell.keys,
-                metal: pricetfItem.sell.metal
-            };
-            return [final_buyObj, final_sellObj];
-        } else {
-            // We rethrow the error.
-            throw error;
-        }
-    };
+    }
+  } catch (error) {
+    // If configured, we fallback onto prices.tf for the price.
+    if (fallbackOntoPricesTf) {
+      const final_buyObj = {
+        keys: pricetfItem.buy.keys,
+        metal: pricetfItem.buy.metal,
+      };
+      const final_sellObj = {
+        keys: pricetfItem.sell.keys,
+        metal: pricetfItem.sell.metal,
+      };
+      return [final_buyObj, final_sellObj];
+    } else {
+      // We rethrow the error.
+      throw error;
+    }
+  }
 };
 
 function clamp(val, min, max) {

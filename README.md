@@ -85,24 +85,12 @@ CREATE TABLE schemaname.listing_stats (
     moving_avg_buy_count real DEFAULT 0,
     current_sell_count integer DEFAULT 0,
     moving_avg_sell_count real DEFAULT 0;
+    current_buy_count integer DEFAULT 0,
+    moving_avg_buy_count real DEFAULT 0,
+    current_sell_count integer DEFAULT 0,
+    moving_avg_sell_count real DEFAULT 0;
 );
 ```
-
-### Database Schema Updates
-
-**If you are upgrading from a previous version, you must update your database schema to add new columns to `schemaname.listing_stats`.**
-
-Run the following SQL to update your database:
-
-```SQL
-ALTER TABLE schemaname.listing_stats
-    ADD COLUMN current_buy_count integer DEFAULT 0,
-    ADD COLUMN moving_avg_buy_count real DEFAULT 0,
-    ADD COLUMN current_sell_count integer DEFAULT 0,
-    ADD COLUMN moving_avg_sell_count real DEFAULT 0;
-```
-
-Alternatively, run the provided `update-listing-stats.sql` file.
 
 Configuration
 -------------
